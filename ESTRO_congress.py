@@ -5,7 +5,7 @@ from playwright.sync_api import sync_playwright
 def clean_deadline_text(text, start_date):
     """
     Cleans messy strings like '[ Late Registration deadline 15 April 2026 ]'
-    and converts them into actual date objects.
+    and extracts dates from it.
     """
     if not text:
         return None
