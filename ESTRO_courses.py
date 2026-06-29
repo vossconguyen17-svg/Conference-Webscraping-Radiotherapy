@@ -119,25 +119,34 @@ def scrape_estro_courses():
         browser.close()
     return all_data
 
+
+# --- SINGLE CLEAN EXECUTION BLOCK ---
 if __name__ == "__main__":
-    results = scrape_estro_courses()
+    results = scrape_estro_courses()  # Aligned with the correct function name
     
     if results:
         df = pd.DataFrame(results)
         
-        # Cleanup
+        # Remove duplicates
         df = df.drop_duplicates(subset=['Event Name', 'Start Date'])
         
-        # Convert to Date objects for CSV
+        # Convert to standard Date objects for cleaner CSV output
         date_cols = ["Start Date", "End Date", "Deadline Date"]
         for col in date_cols:
             df[col] = pd.to_datetime(df[col]).dt.date
         
-        filename = "ESTRO_courses.csv"
-        df.to_csv(filename, index=False, encoding="utf-8")
+        # 1. Define your target folder path
+        output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
         
-        print("\n" + "="*40)
-        print(f"SUCCESS: {len(df)} courses saved to {filename}!")
-        print("="*40)
+        # 2. Create the folder dynamically if it doesn't exist yet
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        # 3. Securely link folder path and filename
+        file_path = os.path.join(output_folder, "ESTRO_courses.csv")
+        
+        # 4. Save your data out cleanly
+        df.to_csv(file_path, index=False, encoding="utf-8")
+        print(f"\nSUCCESS: Saved {len(df)} ESTRO courses to {file_path}")
     else:
-        print("\n❌ FAILED to extract data.")
+        print("\nNo matching events found.")
