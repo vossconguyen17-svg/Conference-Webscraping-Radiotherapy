@@ -1,0 +1,150 @@
+import os
+import re
+import pandas as pd
+from playwright.sync_api import sync_playwright
+from rapidfuzz import process, fuzz
+
+# --- ADVANCED CONFIGURATION ---
+CORE_KEYWORDS = ["radiotherapy", "oncology", "radiation", "physics", "dosimetry", "linac", "brachytherapy", "frcr", "cancer", "prostate", "breast"]
+GENERIC_KEYWORDS = ["workplace", "racism", "equality", "leadership", "cpd", "nhs", "workforce", "education", "policy", "legal", "q&a", "interview"]
+DIAGNOSTIC_BLACKLIST = ["mri", "ct", "ultrasound", "mammography", "diagnostic", "x-ray", "cardiac", "echocardiography"]
+
+THRESHOLD = 70 
+
+def is_radiotherapy_event(title):
+    if not title:
+        return False
+    
+    title_lower = title.lower()
+    
+    # Tier 1: Core keywords
+    core_match = process.extractOne(title_lower, CORE_KEYWORDS, scorer=fuzz.partial_ratio)
+    if core_match and core_match[1] >= THRESHOLD:
+        return True
+        
+    # Tier 2: Generic topics
+    generic_match = process.extractOne(title_lower, GENERIC_KEYWORDS, scorer=fuzz.partial_ratio)
+    if generic_match and generic_match[1] >= THRESHOLD:
+        blacklist_match = process.extractOne(title_lower, DIAGNOSTIC_BLACKLIST, scorer=fuzz.partial_ratio)
+        if blacklist_match and blacklist_match[1] >= THRESHOLD:
+            print(f"🛑 Filtered out diagnostic event: {title}")
+            return False 
+        return True
+        
+    return False
+
+def parse_sor_date(date_text):
+    """
+    Cleans 'Wednesday 08 July 2026 - 19:00 - 20:00' 
+    and returns a valid Pandas Timestamp or None.
+    """
+    if not date_text:
+        return None
+    try:
+        # Strip out the times by taking everything before the first hyphen
+        clean_date_str = date_text.split("-")[0].strip()
+        # Parse standard string like "Wednesday 08 July 2026"
+        return pd.to_datetime(clean_date_str, errors='coerce')
+    except:
+        return None
+
+def scrape_sor_events():
+    all_results = []
+    page_num = 1
+    
+    with sync_playwright() as p:
+        print("--- Launching SoR Scraper ---")
+        browser = p.chromium.launch(channel="msedge", headless=False)
+        context = browser.new_context()
+        page = context.new_page()
+        
+        while True:
+            url = f"https://www.sor.org/events?page={page_num}"
+            print(f"\nScanning Page {page_num}: {url}")
+            
+            try:
+                page.goto(url, wait_until="networkidle", timeout=45000)
+            except Exception as e:
+                print(f"⚠️ Failed to load page {page_num}: {e}")
+                break
+
+            cards = page.locator(".preview-card").all()
+            if not cards:
+                print(f"No more event cards found. Ending crawl at page {page_num}.")
+                break
+                
+            print(f"Found {len(cards)} events on page {page_num}. Filtering...")
+            
+            for card in cards:
+                try:
+                    title_el = card.locator(".preview-card__title").first
+                    title = title_el.inner_text().strip() if title_el.count() > 0 else ""
+                    
+                    if not title:
+                        continue
+                    
+                    if is_radiotherapy_event(title):
+                        # Extract the URL link safely 
+                        link_el = card.locator("a").first
+                        raw_href = link_el.get_attribute("href") if link_el.count() > 0 else ""
+                        full_url = raw_href if raw_href.startswith("http") else f"https://www.sor.org{raw_href}"
+                        
+                        # New Feature: Grab Date & Time element
+                        date_el = card.locator(".preview-card__date-time").first
+                        raw_date_text = date_el.inner_text().strip() if date_el.count() > 0 else ""
+                        parsed_date = parse_sor_date(raw_date_text)
+                        
+                        # New Feature: Grab Summary element
+                        summary_el = card.locator(".preview-card__summary").first
+                        summary_text = summary_el.inner_text().strip() if summary_el.count() > 0 else "No description found."
+                        
+                        print(f"  🎯 Match Found: {title}")
+                        all_results.append({
+                            "Event Name": title,
+                            "Start Date": parsed_date,
+                            "End Date": parsed_date,  # Assigning same day for single-day events
+                            "Summary": summary_text,
+                            "URL": full_url,
+                            "Organisation": "SoR",
+                            "Scraped On": pd.Timestamp.now().strftime('%Y-%m-%d')
+                        })
+                except Exception as e:
+                    print(f"  ⚠️ Skipping an item due to error: {e}")
+            
+            page_num += 1
+            page.wait_for_timeout(1000) 
+            
+        browser.close()
+    return all_results
+
+
+# --- SINGLE CLEAN EXECUTION BLOCK ---
+if __name__ == "__main__":
+    results = scrape_sor_events()
+    
+    if results:
+        df = pd.DataFrame(results)
+        
+        # Remove duplicates
+        df = df.drop_duplicates(subset=['Event Name'])
+        
+        # Format the dates elegantly to look exactly like your other sheets (YYYY-MM-DD)
+        date_cols = ["Start Date", "End Date"]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col]).dt.date
+        
+        # 1. Target folder path
+        output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
+        
+        # 2. Automatically build directory if missing
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        # 3. Form clean destination path
+        file_path = os.path.join(output_folder, "SoR_radiotherapy_events.csv")
+        
+        # 4. Save out file
+        df.to_csv(file_path, index=False, encoding="utf-8")
+        print(f"\nSUCCESS: Saved {len(df)} SoR events to {file_path}")
+    else:
+        print("\nNo matching radiotherapy events found on SoR.")
