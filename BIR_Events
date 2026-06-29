@@ -1,0 +1,109 @@
+import os
+import pandas as pd
+from playwright.sync_api import sync_playwright
+from rapidfuzz import process, fuzz
+
+# --- CONFIGURATION ---
+KEYWORDS = ["radiotherapy", "oncology", "radiation", "physics", "dosimetry", "linac", "brachytherapy", "frcr", "imaging", "congress"]
+THRESHOLD = 70 
+
+def is_radiotherapy_event(title):
+    if not title:
+        return False
+    match = process.extractOne(title.lower(), KEYWORDS, scorer=fuzz.partial_ratio)
+    return match[1] >= THRESHOLD if match else False
+
+def scrape_bir_events():
+    base_url = "https://www.mybir.org.uk/l/s/events?language=en_GB"
+    all_results = []
+
+    with sync_playwright() as p:
+        print("--- Launching BIR Scraper ---")
+        browser = p.chromium.launch(channel="msedge", headless=False)
+        context = browser.new_context()
+        page = context.new_page()
+        
+        print(f"Connecting to landing page: {base_url}")
+        page.goto(base_url, wait_until="networkidle", timeout=60000)
+
+        # Wait for the tile container to appear
+        try:
+            page.wait_for_selector(".pfm-event-tile", timeout=20000)
+            print("✅ Event tiles detected.")
+        except:
+            print("❌ Timeout: Could not find '.pfm-event-tile'.")
+            browser.close()
+            return []
+
+        # STEP 1: Discovery & Fuzzy Filtering
+        tiles = page.locator(".pfm-event-tile").all()
+        print(f"Found {len(tiles)} total tiles. Filtering...")
+
+        potential_links = []
+        for tile in tiles:
+            title_el = tile.locator(".pfm-label")
+            date_el = tile.locator(".pfm-sub_label")
+            
+            title = title_el.first.inner_text().strip() if title_el.count() > 0 else ""
+            date_range = date_el.first.inner_text().strip() if date_el.count() > 0 else ""
+            
+            if is_radiotherapy_event(title):
+                button = tile.locator("button[data-url]").first
+                relative_url = button.get_attribute("data-url")
+                
+                if relative_url:
+                    full_url = f"https://www.mybir.org.uk{relative_url}"
+                    potential_links.append({
+                        "title": title, 
+                        "url": full_url, 
+                        "original_date": date_range
+                    })
+
+        print(f"✅ Filtered down to {len(potential_links)} relevant events.")
+
+        # STEP 2: Deep Scraping
+        for item in potential_links:
+            print(f"  -> Deep Scraping: {item['title']}")
+            try:
+                page.goto(item['url'], wait_until="networkidle", timeout=45000)
+                
+                desc_el = page.locator(".slds-rich-text-editor__output").first
+                description = desc_el.inner_text().strip() if desc_el.count() > 0 else "No description found."
+                
+                all_results.append({
+                    "Event Name": item['title'],
+                    "Date Range": item['original_date'],
+                    "URL": item['url'],
+                    "Summary": description[:500].replace('\n', ' ') + "...", 
+                    "Organisation": "BIR",
+                    "Scraped On": pd.Timestamp.now().strftime('%Y-%m-%d')
+                })
+            except Exception as e:
+                print(f"   ⚠️ Skipping {item['title']} due to error: {e}")
+
+        browser.close()
+    return all_results
+
+
+# --- EXECUTION BLOCK ---
+if __name__ == "__main__":
+    results = scrape_bir_events()
+    
+    if results:
+        df = pd.DataFrame(results)
+        
+        # 1. Define your target folder path
+        output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
+        
+        # 2. Create the folder dynamically if it doesn't exist yet
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        # 3. Securely link folder path and filename
+        file_path = os.path.join(output_folder, "bir_radiotherapy_events.csv")
+        
+        # 4. Save your data out cleanly
+        df.to_csv(file_path, index=False, encoding="utf-8")
+        print(f"\nSUCCESS: Saved {len(df)} BIR events to {file_path}")
+    else:
+        print("\nNo matching events found.")
