@@ -5,7 +5,7 @@ from playwright.sync_api import sync_playwright
 def clean_deadline_text(text, start_date):
     """
     Cleans messy strings like '[ Late Registration deadline 15 April 2026 ]'
-    and extracts dates from it.
+    and converts them into actual date objects.
     """
     if not text:
         return None
@@ -24,7 +24,7 @@ def clean_deadline_text(text, start_date):
         "late registration deadline", 
         "early bird deadline", 
         "deadline", 
-            ]
+    ]
     
     for word in noise_words:
         clean_text = clean_text.lower().replace(word, "").strip()
@@ -120,8 +120,10 @@ def scrape_radiotherapy_congresses():
         browser.close()
     return all_data
 
+
+# --- SINGLE CLEAN EXECUTION BLOCK ---
 if __name__ == "__main__":
-    results = scrape_radiotherapy_congresses()
+    results = scrape_radiotherapy_congresses()  # Fixed function name
     
     if results:
         df = pd.DataFrame(results)
@@ -134,11 +136,18 @@ if __name__ == "__main__":
         for col in date_cols:
             df[col] = pd.to_datetime(df[col]).dt.date
         
-        filename = "ESTRO_congresses.csv"
-        df.to_csv(filename, index=False, encoding="utf-8")
+        # 1. Define your target folder path
+        output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
         
-        print("\n" + "="*40)
-        print(f"SUCCESS: {len(df)} congresses saved to {filename}!")
-        print("="*40)
+        # 2. Create the folder dynamically if it doesn't exist yet
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        # 3. Securely link folder path and filename
+        file_path = os.path.join(output_folder, "ESTRO_congresses.csv")
+        
+        # 4. Save your data out cleanly
+        df.to_csv(file_path, index=False, encoding="utf-8")
+        print(f"\nSUCCESS: Saved {len(df)} ESTRO congresses to {file_path}")
     else:
-        print("\n❌ FAILED to extract data.")
+        print("\nNo matching events found.")
