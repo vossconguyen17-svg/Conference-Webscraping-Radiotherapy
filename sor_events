@@ -41,12 +41,39 @@ def parse_sor_date(date_text):
     if not date_text:
         return None
     try:
-        # Strip out the times by taking everything before the first hyphen
         clean_date_str = date_text.split("-")[0].strip()
-        # Parse standard string like "Wednesday 08 July 2026"
         return pd.to_datetime(clean_date_str, errors='coerce')
     except:
         return None
+
+def extract_clean_city(venue_text):
+    """
+    Cleans up a raw venue string where the City comes first 
+    (e.g., 'London - Royal College...' or 'Manchester, Venue Name').
+    """
+    if not venue_text:
+        return "Online"
+        
+    venue_lower = venue_text.lower()
+    
+    # 1. Catch virtual setups immediately
+    if any(word in venue_lower for word in ["virtual", "webinar", "online", "teams", "zoom"]):
+        return "Online"
+        
+    # 2. Strip out trailing parenthetical fluff
+    clean_text = re.sub(r'\(.*?\)', '', venue_text).strip()
+        
+    # 3. Split on commas or ANY type of dash (hyphen -, en-dash –, em-dash —)
+    parts = [p.strip() for p in re.split(r'[,–—\-]', clean_text) if p.strip()]
+    
+    if parts:
+        first_part = parts[0]
+        
+        # If the first section is 3 words or less, grab it as the city!
+        if len(first_part.split()) <= 3:
+            return first_part
+
+    return venue_text
 
 def scrape_sor_events():
     all_results = []
@@ -72,6 +99,8 @@ def scrape_sor_events():
             if not cards:
                 print(f"No more event cards found. Ending crawl at page {page_num}.")
                 break
+
+            deadline_comment = "Check website for submission deadlines"
                 
             print(f"Found {len(cards)} events on page {page_num}. Filtering...")
             
@@ -84,28 +113,40 @@ def scrape_sor_events():
                         continue
                     
                     if is_radiotherapy_event(title):
-                        # Extract the URL link safely 
                         link_el = card.locator("a").first
                         raw_href = link_el.get_attribute("href") if link_el.count() > 0 else ""
                         full_url = raw_href if raw_href.startswith("http") else f"https://www.sor.org{raw_href}"
                         
-                        # New Feature: Grab Date & Time element
                         date_el = card.locator(".preview-card__date-time").first
                         raw_date_text = date_el.inner_text().strip() if date_el.count() > 0 else ""
                         parsed_date = parse_sor_date(raw_date_text)
                         
-                        # New Feature: Grab Summary element
                         summary_el = card.locator(".preview-card__summary").first
-                        summary_text = summary_el.inner_text().strip() if summary_el.count() > 0 else "No description found."
+                        summary_text = summary_el.inner_text().strip() if summary_el.count() > 0 else ""
                         
-                        print(f"  🎯 Match Found: {title}")
+                        # --- DIRECT METADATA li SELECTOR ---
+                        raw_location = "Online"
+                        li_elements = card.locator("li").all()
+                        for li in li_elements:
+                            li_text = li.inner_text().strip()
+                            if li_text and not any(word in li_text.lower() for word in ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december", "view details"]):
+                                raw_location = li_text
+                                break
+                        
+                        # --- CLEANING THE CITY FOR POWER BI ---
+                        location = extract_clean_city(raw_location)
+                        
+                        print(f"  🎯 Match Found: {title} | Parsed Venue: '{location}'")
                         all_results.append({
                             "Event Name": title,
-                            "Start Date": parsed_date,
-                            "End Date": parsed_date,  # Assigning same day for single-day events
-                            "Summary": summary_text,
+                            "Start Date": parsed_date if pd.notnull(parsed_date) else "Check Website",
+                            "End Date": parsed_date if pd.notnull(parsed_date) else "Check Website", 
+                            "Deadline Date": deadline_comment, 
+                            "Registration Info": summary_text if summary_text else "See URL details",
+                            "Location": location, 
                             "URL": full_url,
                             "Organisation": "SoR",
+                            "Category": "Meeting & Courses",        
                             "Scraped On": pd.Timestamp.now().strftime('%Y-%m-%d')
                         })
                 except Exception as e:
@@ -118,33 +159,23 @@ def scrape_sor_events():
     return all_results
 
 
-# --- SINGLE CLEAN EXECUTION BLOCK ---
+# --- EXECUTION BLOCK ---
 if __name__ == "__main__":
     results = scrape_sor_events()
     
     if results:
         df = pd.DataFrame(results)
-        
-        # Remove duplicates
         df = df.drop_duplicates(subset=['Event Name'])
         
-        # Format the dates elegantly to look exactly like your other sheets (YYYY-MM-DD)
-        date_cols = ["Start Date", "End Date"]
-        for col in date_cols:
-            df[col] = pd.to_datetime(df[col]).dt.date
+        for col in ["Start Date", "End Date"]:
+            df[col] = df[col].apply(lambda x: x.date() if isinstance(x, pd.Timestamp) else x)
         
-        # 1. Target folder path
         output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
-        
-        # 2. Automatically build directory if missing
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
             
-        # 3. Form clean destination path
         file_path = os.path.join(output_folder, "SoR_radiotherapy_events.csv")
-        
-        # 4. Save out file
         df.to_csv(file_path, index=False, encoding="utf-8")
-        print(f"\nSUCCESS: Saved {len(df)} SoR events to {file_path}")
+        print(f"\nSUCCESS: Saved {len(df)} structurally-aligned SoR events with targeted Location tracking to {file_path}")
     else:
         print("\nNo matching radiotherapy events found on SoR.")
