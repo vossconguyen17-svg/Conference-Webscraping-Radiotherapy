@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 from playwright.sync_api import sync_playwright
 from rapidfuzz import process, fuzz
@@ -13,6 +14,70 @@ def is_radiotherapy_event(title):
     match = process.extractOne(title.lower(), KEYWORDS, scorer=fuzz.partial_ratio)
     return match[1] >= THRESHOLD if match else False
 
+def parse_bir_dates(date_str):
+    """
+    Parses and extracts Start and End dates from typical BIR string formats:
+    - '30 September 2026' -> (2026-09-30, 2026-09-30)
+    - '11 - 12 March 2027' -> (2027-03-11, 2027-03-12)
+    """
+    if not date_str:
+        return None, None
+    
+    date_str = date_str.strip()
+    try:
+        # Case 1: Single Date (e.g., "30 September 2026")
+        single_match = re.match(r"^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$", date_str)
+        if single_match:
+            dt = pd.to_datetime(date_str, errors='coerce')
+            return dt.date(), dt.date()
+            
+        # Case 2: Range within same month (e.g., "11 - 12 March 2027")
+        range_match = re.match(r"^(\d{1,2})\s*[-–]\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$", date_str)
+        if range_match:
+            d1, d2, month, year = range_match.groups()
+            dt1 = pd.to_datetime(f"{d1} {month} {year}", errors='coerce')
+            dt2 = pd.to_datetime(f"{d2} {month} {year}", errors='coerce')
+            return dt1.date(), dt2.date()
+            
+    except Exception as e:
+        print(f"  ⚠️ Date parsing skipped/failed for '{date_str}': {e}")
+        
+    return None, None
+
+def extract_clean_city(venue_text):
+    """
+    Cleans up a raw venue string relying purely on layout, comma splits,
+    and postcode identification to extract clean cities for Power BI.
+    """
+    if not venue_text:
+        return "United Kingdom"
+        
+    venue_lower = venue_text.lower()
+    
+    # 1. Catch virtual setups immediately
+    if any(word in venue_lower for word in ["virtual", "webinar", "online", "teams", "zoom"]):
+        return "Online"
+        
+    # 2. Strip out trailing parenthetical fluff like "London Office (In-Person Event)"
+    clean_text = re.sub(r'\(.*?\)', '', venue_text).strip()
+        
+    # 3. Process structural splitting
+    parts = [p.strip() for p in clean_text.split(",") if p.strip()]
+    if parts:
+        last_part = parts[-1]
+        
+        # Standard UK alphanumeric Postcode validation engine regex
+        uk_postcode_regex = r'[A-Z]{1,2}[0-9R][0-9A-Z]?\s*[0-9][A-Z]{2}'
+        
+        # If the last item is a postcode, look one index back to grab the city
+        if re.search(uk_postcode_regex, last_part, re.IGNORECASE):
+            return parts[-2] if len(parts) > 1 else "United Kingdom"
+            
+        # If no postcode is present, the last structural comma index is our city
+        return last_part
+
+    return venue_text
+
 def scrape_bir_events():
     base_url = "https://www.mybir.org.uk/l/s/events?language=en_GB"
     all_results = []
@@ -26,7 +91,6 @@ def scrape_bir_events():
         print(f"Connecting to landing page: {base_url}")
         page.goto(base_url, wait_until="networkidle", timeout=60000)
 
-        # Wait for the tile container to appear
         try:
             page.wait_for_selector(".pfm-event-tile", timeout=20000)
             print("✅ Event tiles detected.")
@@ -35,7 +99,6 @@ def scrape_bir_events():
             browser.close()
             return []
 
-        # STEP 1: Discovery & Fuzzy Filtering
         tiles = page.locator(".pfm-event-tile").all()
         print(f"Found {len(tiles)} total tiles. Filtering...")
 
@@ -61,25 +124,40 @@ def scrape_bir_events():
 
         print(f"✅ Filtered down to {len(potential_links)} relevant events.")
 
-        # STEP 2: Deep Scraping
+        # Deep profile crawling sequence
         for item in potential_links:
             print(f"  -> Deep Scraping: {item['title']}")
             try:
                 page.goto(item['url'], wait_until="networkidle", timeout=45000)
                 
                 desc_el = page.locator(".slds-rich-text-editor__output").first
-                description = desc_el.inner_text().strip() if desc_el.count() > 0 else "No description found."
+                description = desc_el.inner_text().strip() if desc_el.count() > 0 else ""
+                
+                # --- VENUE EXTRACTION AND DE-NOISING ---
+                venue_match = re.search(r"Venue\s*:\s*(.*)", description, re.IGNORECASE)
+                raw_location = venue_match.group(1).strip() if venue_match else "Online"
+                
+                # Apply dynamic structural city parsing
+                location = extract_clean_city(raw_location)
+                print(f"     🎯 Parsed Location for Power BI: '{location}'")
+
+                start_date, end_date = parse_bir_dates(item['original_date'])
+                deadline_comment = "Check website for submission deadlines"
                 
                 all_results.append({
                     "Event Name": item['title'],
-                    "Date Range": item['original_date'],
+                    "Start Date": start_date if start_date else "Check Website",
+                    "End Date": end_date if end_date else "Check Website",
+                    "Deadline Date": deadline_comment,
+                    "Registration Info": "See URL details",
+                    "Location": location,
                     "URL": item['url'],
-                    "Summary": description[:500].replace('\n', ' ') + "...", 
                     "Organisation": "BIR",
+                    "Category": "Meeting/Event",
                     "Scraped On": pd.Timestamp.now().strftime('%Y-%m-%d')
                 })
             except Exception as e:
-                print(f"   ⚠️ Skipping {item['title']} due to error: {e}")
+                print(f"    ⚠️ Skipping {item['title']} due to error: {e}")
 
         browser.close()
     return all_results
@@ -92,18 +170,12 @@ if __name__ == "__main__":
     if results:
         df = pd.DataFrame(results)
         
-        # 1. Define your target folder path
         output_folder = r"C:\Users\VONGUYEN\OneDrive - NHS\Python Code\Radiotherapy Events"
-        
-        # 2. Create the folder dynamically if it doesn't exist yet
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
             
-        # 3. Securely link folder path and filename
         file_path = os.path.join(output_folder, "bir_radiotherapy_events.csv")
-        
-        # 4. Save your data out cleanly
         df.to_csv(file_path, index=False, encoding="utf-8")
-        print(f"\nSUCCESS: Saved {len(df)} BIR events to {file_path}")
+        print(f"\nSUCCESS: Saved {len(df)} structurally-aligned BIR events to {file_path}")
     else:
         print("\nNo matching events found.")
