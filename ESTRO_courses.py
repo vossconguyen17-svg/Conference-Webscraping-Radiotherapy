@@ -108,11 +108,10 @@ def scrape_estro_courses():
                 "End Date": end_date,
                 "Deadline Date": deadline_date,
                 "Registration Info": summary_text,
-                "Original Date Range": date_text,
                 "Location": location_text,
                 "URL": full_url,
                 "Organisation": "ESTRO",
-                "Type": "Course",
+                "Category": "Course",
                 "Scraped On": pd.Timestamp.now().strftime('%Y-%m-%d')
             })
 
